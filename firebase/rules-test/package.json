@@ -1,0 +1,10 @@
+{
+  "name": "tangcal-rules-test",
+  "private": true,
+  "type": "module",
+  "description": "Checks firestore.rules against the full order flow in the local emulator. Needs Java 11+ and the Firebase CLI. Run from firebase/: npm --prefix rules-test install, then: firebase emulators:exec --only firestore --project demo-tangcal \"node rules-test/test.mjs firestore.rules\"",
+  "dependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "firebase": "^12.0.0"
+  }
+}

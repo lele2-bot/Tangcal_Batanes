@@ -1,0 +1,187 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // users/{uid} as a DocumentReference, the way owner_id / customer_id /
+    // rider_id are stored on Restaurants, Customers and Rider.
+    function me() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function isRider() {
+      return signedIn()
+        && get(me()).data.get('role', '') == 'Delivery Rider';
+    }
+
+    match /users/{userId} {
+      allow create: if signedIn() && request.auth.uid == userId;
+      allow read: if signedIn();
+      allow update, delete: if signedIn() && request.auth.uid == userId;
+
+      // Device tokens for push notifications (lib/backend/push_notifications.dart).
+      // Only the Cloud Functions (admin) read other users' tokens.
+      match /fcm_tokens/{token} {
+        allow read, write: if signedIn() && request.auth.uid == userId;
+      }
+    }
+
+    // ---------- Chat ----------
+
+    match /chats/{document} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn() && me() in resource.data.users;
+    }
+
+    match /chat_messages/{document} {
+      allow read, create: if signedIn();
+      allow update, delete: if signedIn() && resource.data.user == me();
+    }
+
+    // ---------- Role profiles ----------
+
+    match /Restaurants/{document} {
+      allow read: if true;
+      allow create: if signedIn() && request.resource.data.owner_id == me();
+      allow update: if signedIn()
+        && resource.data.owner_id == me()
+        && request.resource.data.owner_id == me();
+      allow delete: if signedIn() && resource.data.owner_id == me();
+    }
+
+    match /Customers/{document} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.customer_id == me();
+      allow update: if signedIn()
+        && resource.data.customer_id == me()
+        && request.resource.data.customer_id == me();
+      allow delete: if signedIn() && resource.data.customer_id == me();
+    }
+
+    match /Rider/{document} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.rider_id == me();
+      allow update: if signedIn()
+        && resource.data.rider_id == me()
+        && request.resource.data.rider_id == me();
+      allow delete: if signedIn() && resource.data.rider_id == me();
+    }
+
+    // ---------- Menu ----------
+
+    match /Products/{document} {
+      allow read: if true;
+      // A product can only be attached to a restaurant you own.
+      allow create: if signedIn()
+        && get(request.resource.data.restaurant_id).data.owner_id == me();
+      allow update: if signedIn() && (
+        (get(resource.data.restaurant_id).data.owner_id == me()
+          && request.resource.data.restaurant_id == resource.data.restaurant_id)
+        // Legacy products created without restaurant_id can be claimed once.
+        || (!('restaurant_id' in resource.data)
+          && get(request.resource.data.restaurant_id).data.owner_id == me())
+      );
+      allow delete: if signedIn()
+        && get(resource.data.restaurant_id).data.owner_id == me();
+    }
+
+    // ---------- Orders ----------
+    //
+    // Pending -> Cooking -> Ready for Pickup -> On Delivery -> Delivered
+    // Pending -> Cancelled
+    // (mirrors lib/backend/order_service.dart)
+
+    function canSeeOrder(order) {
+      return signedIn() && (
+        order.customer_id == request.auth.uid
+        || order.get('restaurant_owner_id', '') == request.auth.uid
+        || order.get('rider_id', '') == request.auth.uid
+        || (order.order_status == 'Ready for Pickup' && isRider())
+      );
+    }
+
+    function moves(from, to) {
+      return resource.data.order_status == from
+        && request.resource.data.order_status == to;
+    }
+
+    function onlyChanges(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    match /Orders/{orderId} {
+      allow read: if canSeeOrder(resource.data);
+
+      allow create: if signedIn()
+        && request.resource.data.customer_id == request.auth.uid
+        && request.resource.data.order_status == 'Pending'
+        && request.resource.data.rider_id == ''
+        && request.resource.data.total_amount is number
+        && request.resource.data.total_amount > 0
+        // restaurant_owner_id must really be the owner of restaurant_id.
+        && get(/databases/$(database)/documents/Restaurants/$(request.resource.data.restaurant_id)).data.owner_id
+             == /databases/$(database)/documents/users/$(request.resource.data.restaurant_owner_id);
+
+      allow update: if signedIn() && (
+        // Customer cancels before the restaurant accepts.
+        (resource.data.customer_id == request.auth.uid
+          && moves('Pending', 'Cancelled')
+          && request.resource.data.cancelled_by == 'customer'
+          && onlyChanges(['order_status', 'updated_at', 'cancelled_by']))
+
+        // Restaurant accepts / marks ready.
+        || (resource.data.get('restaurant_owner_id', '') == request.auth.uid
+          && (moves('Pending', 'Cooking')
+            || moves('Cooking', 'Ready for Pickup'))
+          && onlyChanges(['order_status', 'updated_at']))
+
+        // Restaurant declines.
+        || (resource.data.get('restaurant_owner_id', '') == request.auth.uid
+          && moves('Pending', 'Cancelled')
+          && request.resource.data.cancelled_by == 'restaurant'
+          && onlyChanges(['order_status', 'updated_at', 'cancelled_by']))
+
+        // A rider claims an unassigned order that is ready.
+        || (isRider()
+          && moves('Ready for Pickup', 'On Delivery')
+          && resource.data.get('rider_id', '') == ''
+          && request.resource.data.rider_id == request.auth.uid
+          && onlyChanges(['order_status', 'updated_at', 'rider_id', 'rider_name']))
+
+        // The assigned rider completes the delivery.
+        || (resource.data.get('rider_id', '') == request.auth.uid
+          && moves('On Delivery', 'Delivered')
+          && onlyChanges(['order_status', 'updated_at', 'delivered_at']))
+      );
+
+      allow delete: if false;
+
+      match /Orders_Items/{itemId} {
+        allow read: if canSeeOrder(get(/databases/$(database)/documents/Orders/$(orderId)).data);
+        // Items are written in the same batch as their order.
+        allow create: if signedIn()
+          && getAfter(/databases/$(database)/documents/Orders/$(orderId)).data.customer_id == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    match /{path=**}/Orders_Items/{document} {
+      allow read: if signedIn();
+    }
+
+    // ---------- Legacy collections (not used by the current screens) ----------
+
+    match /cart_items/{document} {
+      allow read, update, delete: if signedIn() && resource.data.owned == me();
+      allow create: if signedIn() && request.resource.data.owned == me();
+    }
+
+    match /order/{document} {
+      allow read, update, delete: if signedIn() && resource.data.ownedBy == me();
+      allow create: if signedIn() && request.resource.data.ownedBy == me();
+    }
+  }
+}

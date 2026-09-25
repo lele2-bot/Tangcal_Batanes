@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "630075721339",
+    "project_id": "tangcal-batanes",
+    "storage_bucket": "tangcal-batanes.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:630075721339:android:3026e96e1a7df9ad6fc4de",
+        "android_client_info": {
+          "package_name": "com.mycompany.tangcal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD4z0hkmfKOEQoFrlqCVDgDlJirDitEQeI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
